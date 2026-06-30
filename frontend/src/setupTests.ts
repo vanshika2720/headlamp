@@ -18,6 +18,35 @@
 import '@testing-library/jest-dom/vitest';
 import indexeddb from 'fake-indexeddb';
 
+// Nock v14 uses @mswjs/interceptors which internally calls `new Request(url, init)` when
+// intercepting fetch. In jsdom v24+, `globalThis.Request` wraps undici's native Request,
+// which validates that `init.signal instanceof nativeAbortSignal`. But jsdom provides its
+// own AbortController whose signals fail that native instanceof check.
+// This patch wraps globalThis.Request so that if construction fails due to an incompatible
+// AbortSignal, it retries without the signal. Because setupFiles run before test-file imports,
+// this patch is in place before nock activates and wraps globalThis.Request.
+if (typeof Request !== 'undefined') {
+  const OriginalRequest = globalThis.Request;
+  globalThis.Request = new Proxy(OriginalRequest, {
+    construct(target, args, newTarget) {
+      const [input, init] = args as [any, RequestInit | undefined];
+      if (init?.signal) {
+        try {
+          return Reflect.construct(target, args, newTarget);
+        } catch (e: any) {
+          if (typeof e?.message === 'string' && e.message.includes('AbortSignal')) {
+            const restInit = { ...init };
+            delete (restInit as RequestInit & { signal?: unknown }).signal;
+            return Reflect.construct(target, [input, restInit], newTarget);
+          }
+          throw e;
+        }
+      }
+      return Reflect.construct(target, args, newTarget);
+    },
+  });
+}
+
 globalThis.indexedDB = indexeddb;
 
 if (typeof TextDecoder === 'undefined' && typeof require !== 'undefined') {
